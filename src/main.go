@@ -15,7 +15,6 @@ import (
 )
 
 const (
-	TxPhaseWaitForPrepare = "wait"
 	TxPhasePrepare = "Prepare"
 	TxPhaseReady   = "Ready"
 	TxPhaseCommit = "Commit"
@@ -146,19 +145,19 @@ func (tc *SingleTxCoordinator) CommitTx(TxID string){
 	//	  Leader broadcast Decide Msg with commit/abort T decision.
 	// 4. Backups receive the MSG, log <Commit T>/<Abort T>  execute it.
 	// 5. TxManager release lock on the Tx.
-	// TODO
 
 	timer := time.NewTimer(time.Duration(60 * 1000) * time.Millisecond)
 	prepareChan := make(chan string, len(tc.Cluster))
 
+	// TODO: filtering duplicate replies
 	tc.startPrepare(TxID, prepareChan)
 	decision := tc.waitForReply(TxID, prepareChan, timer)
+	tc.logger.Printf("leader made decision: %v", decision)
 	tc.startDecide(TxID, decision)
 
 }
 
 func (tc *SingleTxCoordinator) Prepare(ctx context.Context, in *pb.PrepareRequest) (*pb.PrepareReply, error){
-
 	if in.TxID != tc.TxID{
 		return nil, errors.New("incompatible TxID")
 	}
@@ -170,7 +169,7 @@ func (tc *SingleTxCoordinator) Prepare(ctx context.Context, in *pb.PrepareReques
 		WillToCommit: true,
 	}
 	// duplicate request 
-	if tc.TxPhase == TxPhasePrepare{
+	if tc.TxPhase == TxPhaseReady{
 		return &reply, nil
 	}
 	
@@ -191,16 +190,25 @@ func (tc *SingleTxCoordinator) Decide(ctx context.Context, in *pb.DecideRequest)
 		FromID: tc.ServerID,
 		ToID: in.FromID,
 	}
-	// ignore duplicate request
-	if tc.TxPhase == TxPhaseReady{
-		switch in.Decision{
-		case TxCommit:
-			tc.CommitFunc(tc.TxID, tc.CoordinatorID)
-		case TxAbort:
+	switch tc.TxPhase{
+		case TxPhaseCommit, TxPhaseAbort:
+			// duplicate
+			return &reply, nil
+		case TxPhasePrepare:
+			// haven't receive Prepare request -> leader must abort the tx.
 			tc.AbortFunc(tc.TxID, tc.CoordinatorID)
-		}
+			tc.TxPhase = TxPhaseAbort
+			return nil, nil	// TODO: New filed indicating the state ?
+		default:
+			switch in.Decision{
+			case TxCommit:
+				tc.CommitFunc(tc.TxID, tc.CoordinatorID)
+				tc.TxPhase = TxPhaseCommit
+			case TxAbort:
+				tc.AbortFunc(tc.TxID, tc.CoordinatorID)
+				tc.TxPhase = TxPhaseAbort
+			}
 	}
-
 	return &reply, nil
 }
 
