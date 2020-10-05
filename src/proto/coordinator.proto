@@ -1,0 +1,35 @@
+syntax = "proto3";
+
+option go_package = "../coordinatorrpc";
+
+service Coordinator{
+    rpc Prepare(PrepareRequest) returns (PrepareReply);
+    rpc Decide(DecideRequest) returns (DecideReply);
+}
+
+message PrepareRequest{
+    string toID = 1;
+    string fromID = 2;
+    string txID = 3;
+
+}
+
+message PrepareReply{
+    string toID = 1;
+    string fromID = 2;
+    string txID = 3;
+    bool willToCommit = 4;
+}
+
+message DecideRequest{
+    string toID = 1;
+    string fromID = 2;
+    string txID = 3;
+    int32 decision = 4;
+}
+
+message DecideReply{
+    string toID = 1;
+    string fromID = 2;
+    string txID = 3;
+}
