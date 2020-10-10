@@ -1,0 +1,83 @@
+version: "3"
+networks:
+  etcdcluster:
+    driver: bridge
+services:
+  etcd1:
+    image: bitnami/etcd:3.4.13
+    container_name: etcd1
+    environment:
+      - ALLOW_NONE_AUTHENTICATION=yes`
+      - ETCD_ADVERTISE_CLIENT_URLS=http://0.0.0.0:2379
+    command: etcd
+      --name etcd1
+      --listen-peer-urls http://0.0.0.0/2380
+      --initial-cluster etcd1=http://etcd1:2380,etcd2=http://etcd2:2380,etcd3=http://etcd3:2380
+      --initial-advertise-peer-urls http://etcd1:2380
+      --initial-cluster-state new
+      --initial-cluster-token etcd-2pc
+    ports:
+      - "12379:2379"
+      - "12380:2380"
+    expose:
+      - "2379"
+      - "2380"
+    networks:
+      - etcdcluster
+    volumes:
+      - etcd1:/etcd_data
+
+  etcd2:
+    image: bitnami/etcd:3.4.13
+    container_name: etcd2
+    environment:
+      - ALLOW_NONE_AUTHENTICATION=yes
+      - ETCD_ADVERTISE_CLIENT_URLS=http://0.0.0.0:2379
+    command: etcd
+      --name etcd2
+      --listen-peer-urls http://0.0.0.0/2380
+
+      --initial-cluster etcd1=http://etcd1:2380,etcd2=http://etcd2:2380,etcd3=http://etcd3:2380
+      --initial-advertise-peer-urls http://etcd2:2380
+      --initial-cluster-state new
+      --initial-cluster-token etcd-2pc
+    ports:
+      - "22379:2379"
+      - "22380:2380"
+    expose:
+      - "2379"
+      - "2380"
+    networks:
+      - etcdcluster
+    volumes:
+      - etcd2:/etcd_data
+
+  etcd3:
+    image: bitnami/etcd:3.4.13
+    container_name: etcd3
+    environment:
+      - ALLOW_NONE_AUTHENTICATION=yes
+      - ETCD_ADVERTISE_CLIENT_URLS=http://0.0.0.0:2379
+    command: etcd
+      --name etcd3
+      --listen-peer-urls http://0.0.0.0/2380
+
+      --initial-cluster etcd1=http://etcd1:2380,etcd2=http://etcd2:2380,etcd3=http://etcd3:2380
+      --initial-advertise-peer-urls http://etcd3:2380
+      --initial-cluster-state new
+      --initial-cluster-token etcd-2pc
+    ports:
+      - "32379:2379"
+      - "32380:2380"
+    expose:
+      - "2379"
+      - "2380"
+    networks:
+      - etcdcluster
+    volumes:
+      - etcd1:/etcd_data
+
+volumes:
+  etcd1:
+  etcd2:
+  etcd3:

@@ -4,21 +4,22 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"go.uber.org/zap"
-	"google.golang.org/grpc"
 	"log"
 	pb "my2pc/coordinatorrpc"
 	"net"
 	"strconv"
 	"sync"
 	"time"
+
+	"go.uber.org/zap"
+	"google.golang.org/grpc"
 )
 
 const (
 	TxPhasePrepare = "Prepare"
 	TxPhaseReady   = "Ready"
-	TxPhaseCommit = "Commit"
-	TxPhaseAbort = "Abort"
+	TxPhaseCommit  = "Commit"
+	TxPhaseAbort   = "Abort"
 	// TxPhaseUnknown = "Known"  // crash recover
 
 	TxAbort  = int32(0)
@@ -26,7 +27,8 @@ const (
 )
 
 type ValidateFunc = func(TxID string) bool
-type Decision = int32;
+type ActionFunc = func(TxID string, CoordinatorID string)
+type Decision = int32
 
 type SingleTxCoordinator struct {
 	Cluster  map[string]string
@@ -37,66 +39,65 @@ type SingleTxCoordinator struct {
 	CoordinatorID string
 
 	ValidatePred ValidateFunc
-	ReadyFunc    func(TxID string, CoordinatorID string)
-	CommitFunc   func(TxID string, CoordinatorID string)
-	AbortFunc    func(TxID string, CoordinatorID string)
-	
-	logger *log.Logger
+	ReadyFunc    ActionFunc
+	CommitFunc   ActionFunc
+	AbortFunc    ActionFunc
 
+	logger *log.Logger
 }
 
-func (tc *SingleTxCoordinator) nofityTxInfo(TxID string, coorID string){
+func (tc *SingleTxCoordinator) nofityTxInfo(TxID string, coorID string) {
 	tc.TxID = TxID
 	tc.CoordinatorID = coorID
 }
 
-func (tc *SingleTxCoordinator) startPrepare(TxID string, prepareChan chan <- string){
-	for _, ap := range tc.Cluster{
-		go func(addrPort string){
+func (tc *SingleTxCoordinator) startPrepare(TxID string, prepareChan chan<- string) {
+	for _, ap := range tc.Cluster {
+		go func(addrPort string) {
 			PrepareRequest := pb.PrepareRequest{
-				TxID: TxID,
+				TxID:   TxID,
 				FromID: tc.ServerID,
-				ToID: addrPort,
+				ToID:   addrPort,
 			}
 			conn, err := grpc.Dial(addrPort, grpc.WithInsecure())
-			if err != nil{
+			if err != nil {
 				tc.logger.Printf("Prepare phase, failed to connect %v\n. err = %s", addrPort, err.Error())
 				return
 			}
 			defer conn.Close()
 			client := pb.NewCoordinatorClient(conn)
 			rep, err := client.Prepare(context.Background(), &PrepareRequest)
-			if err != nil{
+			if err != nil {
 				tc.logger.Printf("Prepare phase, failed to get reply %v\n, err = %s", addrPort, err.Error())
 				return
-			}else{
+			} else {
 				tc.logger.Printf("got reply %v from %s\n", rep, addrPort)
 			}
-			if rep.WillToCommit{
+			if rep.WillToCommit {
 				prepareChan <- addrPort
 			}
 		}(ap)
 	}
 }
 
-func (tc *SingleTxCoordinator) startDecide(TxID string, decision int32){
-	for _, ap := range tc.Cluster{
-		go func(addrPort string){
+func (tc *SingleTxCoordinator) startDecide(TxID string, decision int32) {
+	for _, ap := range tc.Cluster {
+		go func(addrPort string) {
 			DecideRequest := pb.DecideRequest{
-				TxID: TxID,
-				FromID: tc.ServerID,
-				ToID: addrPort,
+				TxID:     TxID,
+				FromID:   tc.ServerID,
+				ToID:     addrPort,
 				Decision: decision,
 			}
 			conn, err := grpc.Dial(addrPort, grpc.WithInsecure())
-			if err != nil{
+			if err != nil {
 				tc.logger.Printf("Decide phase, failed to connect %v\n. err = %s", addrPort, err.Error())
 				return
 			}
 			defer conn.Close()
 			client := pb.NewCoordinatorClient(conn)
 			_, err = client.Decide(context.Background(), &DecideRequest)
-			if err != nil{
+			if err != nil {
 				tc.logger.Printf("Decide phase, failed to get reply %v\n. err = %s", addrPort, err.Error())
 				return
 			}
@@ -104,26 +105,26 @@ func (tc *SingleTxCoordinator) startDecide(TxID string, decision int32){
 	}
 }
 
-func (tc *SingleTxCoordinator) waitForReply(TxID string, prepareChan <-chan string, timer *time.Timer) Decision{
+func (tc *SingleTxCoordinator) waitForReply(TxID string, prepareChan <-chan string, timer *time.Timer) Decision {
 	cnt := 0
 	quit := false
 	for {
 		select {
-		case <- timer.C:
+		case <-timer.C:
 			quit = true
-		case _ = <- prepareChan:
+		case _ = <-prepareChan:
 			cnt += 1
-			if cnt >= len(tc.Cluster){ // receive all reply
+			if cnt >= len(tc.Cluster) { // receive all reply
 				quit = true
 			}
 		}
-		if quit{
+		if quit {
 			break
 		}
 	}
 
 	decision := TxCommit
-	if cnt != len(tc.Cluster){
+	if cnt != len(tc.Cluster) {
 		decision = TxAbort
 	}
 	// TODO: coordinator should stabilize this decision
@@ -131,8 +132,8 @@ func (tc *SingleTxCoordinator) waitForReply(TxID string, prepareChan <-chan stri
 	return decision
 }
 
-func (tc *SingleTxCoordinator) CommitTx(TxID string){
-	if tc.CoordinatorID != tc.ServerID{
+func (tc *SingleTxCoordinator) CommitTx(TxID string) {
+	if tc.CoordinatorID != tc.ServerID {
 		tc.logger.Panic()
 	}
 
@@ -146,7 +147,7 @@ func (tc *SingleTxCoordinator) CommitTx(TxID string){
 	// 4. Backups receive the MSG, log <Commit T>/<Abort T>  execute it.
 	// 5. TxManager release lock on the Tx.
 
-	timer := time.NewTimer(time.Duration(60 * 1000) * time.Millisecond)
+	timer := time.NewTimer(time.Duration(60*1000) * time.Millisecond)
 	prepareChan := make(chan string, len(tc.Cluster))
 
 	// TODO: filtering duplicate replies
@@ -157,142 +158,142 @@ func (tc *SingleTxCoordinator) CommitTx(TxID string){
 
 }
 
-func (tc *SingleTxCoordinator) Prepare(ctx context.Context, in *pb.PrepareRequest) (*pb.PrepareReply, error){
-	if in.TxID != tc.TxID{
+func (tc *SingleTxCoordinator) Prepare(ctx context.Context, in *pb.PrepareRequest) (*pb.PrepareReply, error) {
+	if in.TxID != tc.TxID {
 		return nil, errors.New("incompatible TxID")
 	}
 
 	reply := pb.PrepareReply{
-		TxID: tc.TxID,
-		FromID: tc.ServerID,
-		ToID: in.FromID,
+		TxID:         tc.TxID,
+		FromID:       tc.ServerID,
+		ToID:         in.FromID,
 		WillToCommit: true,
 	}
-	// duplicate request 
-	if tc.TxPhase == TxPhaseReady{
+	// duplicate request
+	if tc.TxPhase == TxPhaseReady {
 		return &reply, nil
 	}
-	
+
 	reply.WillToCommit = tc.ValidatePred(in.TxID)
 	tc.ReadyFunc(tc.TxID, tc.CoordinatorID)
 	tc.TxPhase = TxPhaseReady
 	return &reply, nil
 }
 
-func (tc *SingleTxCoordinator) Decide(ctx context.Context, in *pb.DecideRequest) (*pb.DecideReply, error){
+func (tc *SingleTxCoordinator) Decide(ctx context.Context, in *pb.DecideRequest) (*pb.DecideReply, error) {
 
 	if in.TxID != tc.TxID {
 		return nil, errors.New(fmt.Sprintf("incompatible TxID %s ", in.TxID))
 	}
 
 	reply := pb.DecideReply{
-		TxID: tc.TxID,
+		TxID:   tc.TxID,
 		FromID: tc.ServerID,
-		ToID: in.FromID,
+		ToID:   in.FromID,
 	}
-	switch tc.TxPhase{
-		case TxPhaseCommit, TxPhaseAbort:
-			// duplicate
-			return &reply, nil
-		case TxPhasePrepare:
-			// haven't receive Prepare request -> leader must abort the tx.
+	switch tc.TxPhase {
+	case TxPhaseCommit, TxPhaseAbort:
+		// duplicate
+		return &reply, nil
+	case TxPhasePrepare:
+		// haven't receive Prepare request -> leader must abort the tx.
+		tc.AbortFunc(tc.TxID, tc.CoordinatorID)
+		tc.TxPhase = TxPhaseAbort
+		return nil, nil // TODO: New filed indicating the state ?
+	default:
+		switch in.Decision {
+		case TxCommit:
+			tc.CommitFunc(tc.TxID, tc.CoordinatorID)
+			tc.TxPhase = TxPhaseCommit
+		case TxAbort:
 			tc.AbortFunc(tc.TxID, tc.CoordinatorID)
 			tc.TxPhase = TxPhaseAbort
-			return nil, nil	// TODO: New filed indicating the state ?
-		default:
-			switch in.Decision{
-			case TxCommit:
-				tc.CommitFunc(tc.TxID, tc.CoordinatorID)
-				tc.TxPhase = TxPhaseCommit
-			case TxAbort:
-				tc.AbortFunc(tc.TxID, tc.CoordinatorID)
-				tc.TxPhase = TxPhaseAbort
-			}
+		}
 	}
 	return &reply, nil
 }
 
-func (tc *SingleTxCoordinator) WithLogger(l *log.Logger) *SingleTxCoordinator{
+func (tc *SingleTxCoordinator) WithLogger(l *log.Logger) *SingleTxCoordinator {
 	tc.logger = l
 	return tc
 }
 
 // Configure Create and run grpc server.
-func (tc *SingleTxCoordinator) Configure(){
+func (tc *SingleTxCoordinator) Configure() {
 	addrPort, _ := tc.Cluster[tc.ServerID]
 	lis, err := net.Listen("tcp", addrPort)
-	if err != nil{
+	if err != nil {
 		tc.logger.Panic()
 	}
 	gs := grpc.NewServer(grpc.ConnectionTimeout(500 * time.Millisecond))
 	pb.RegisterCoordinatorServer(gs, tc)
-	go func(){
-		if err := gs.Serve(lis); err != nil{
+	go func() {
+		if err := gs.Serve(lis); err != nil {
 			tc.logger.Panic(err)
 		}
 	}()
 	tc.logger.Println("start server")
 }
 
-func NewSingleTxCoordinator(clusterInfo map[string]string, selfID string, infoChan chan<- TxMsg) *SingleTxCoordinator{
-	validP := func(TxID string) bool{
+func NewSingleTxCoordinator(clusterInfo map[string]string, selfID string, infoChan chan<- TxMsg) *SingleTxCoordinator {
+	validP := func(TxID string) bool {
 		return true
 	}
 
-	rf := func(TxID string, CoordinatorID string){
-		msg := TxMsg{
-			CoordinatorID: CoordinatorID,
-			Phase: TxPhaseReady,
+	funcFatory := func(Phase string) ActionFunc {
+		return func(TxID string, CoordinatorID string) {
+			infoChan <- TxMsg{
+				TxID:          TxID,
+				CoordinatorID: CoordinatorID,
+				Phase:         Phase,
+			}
 		}
-		infoChan <- msg
 	}
-	cf := func(TxID string, CoordinatorID string){
-		msg := TxMsg{
-			CoordinatorID: CoordinatorID,
-			Phase: TxPhaseCommit,
-		}
-		infoChan <- msg
-	}
-	af := func(TxID string, CoordinatorID string){
-		msg := TxMsg{
-			CoordinatorID: CoordinatorID,
-			Phase: TxPhaseAbort,
-		}
-		infoChan <- msg
-	}
-
 
 	txc := SingleTxCoordinator{
-		TxID: "",
-		TxPhase: TxPhasePrepare,
-		Cluster: clusterInfo,
-		ServerID: selfID,
+		TxID:          "",
+		TxPhase:       TxPhasePrepare,
+		Cluster:       clusterInfo,
+		ServerID:      selfID,
 		CoordinatorID: "",
-		ValidatePred: validP,
-		ReadyFunc: rf,
-		CommitFunc: cf,
-		AbortFunc: af,
+		ValidatePred:  validP,
+		ReadyFunc:     funcFatory(TxPhaseReady),
+		CommitFunc:    funcFatory(TxPhaseCommit),
+		AbortFunc:     funcFatory(TxPhaseAbort),
 	}
 
 	return &txc
 }
 
+func RecoverTxCoordinator(clusterInfo map[string]string, selfID string, infoChan chan<- TxMsg, TxInfo TxMsg) *SingleTxCoordinator {
+	tc := NewSingleTxCoordinator(clusterInfo, selfID, infoChan)
+	tc.TxID = TxInfo.TxID
+	tc.TxPhase = TxInfo.Phase
+	tc.CoordinatorID = TxInfo.CoordinatorID
+	return tc
+}
+
 type TxMsg struct {
+	TxID          string
 	CoordinatorID string
-	Phase string
+	Phase         string
+}
+
+type TxStablizer interface {
+	Stablize(txlog TxMsg) error
 }
 
 // SingleTxManager WAL logger
 type SingleTxManager struct {
 	stabilizer []TxMsg
-	sm map[string] []TxMsg	// TxID -> StateSeq
+	sm         map[string][]TxMsg // TxID -> StateSeq
 
-	tc *SingleTxCoordinator
-	listener   *net.Listener
+	tc       *SingleTxCoordinator
+	listener *net.Listener
 
-	logger *log.Logger
+	logger     *log.Logger
 	TxProgress <-chan TxMsg
-	quitC <-chan struct{}
+	quitC      <-chan struct{}
 }
 
 func (tm *SingleTxManager) WithCoordinator(tc *SingleTxCoordinator) *SingleTxManager {
@@ -300,7 +301,7 @@ func (tm *SingleTxManager) WithCoordinator(tc *SingleTxCoordinator) *SingleTxMan
 	return tm
 }
 
-func (tm *SingleTxManager) WithLogger(l *log.Logger) *SingleTxManager{
+func (tm *SingleTxManager) WithLogger(l *log.Logger) *SingleTxManager {
 	tm.logger = l
 	return tm
 }
@@ -311,74 +312,78 @@ func (tm *SingleTxManager) record(msg TxMsg) *SingleTxManager {
 	return tm
 }
 
-func (tm *SingleTxManager) run(){
+func (tm *SingleTxManager) run() {
 	tm.logger.Printf("running\n")
 	quit := false
 	tm.tc.Configure()
 	for {
 		select {
-		case msg := <- tm.TxProgress:
+		case msg := <-tm.TxProgress:
 			tm.record(msg)
-			if msg.Phase == TxPhaseAbort || msg.Phase == TxPhaseCommit{
+			if msg.Phase == TxPhaseAbort || msg.Phase == TxPhaseCommit {
 				quit = true
 			}
-		case _ = <- tm.quitC:
+		case _ = <-tm.quitC:
 			quit = true
 		}
-		if quit{
+		if quit {
 			break
 		}
 	}
 	tm.logger.Printf("done. statemachine = %v", tm.sm[tm.tc.ServerID])
 }
 
-func NewSingleTxManager(infoChan <-chan TxMsg, quitC <-chan struct{}) *SingleTxManager{
+func NewSingleTxManager(infoChan <-chan TxMsg, quitC <-chan struct{}) *SingleTxManager {
 	tm := SingleTxManager{
 		TxProgress: infoChan,
 		stabilizer: make([]TxMsg, 0, 128),
-		sm: make(map[string][]TxMsg),
-		quitC: quitC,
-		tc: nil,
-		listener: nil,
+		sm:         make(map[string][]TxMsg),
+		quitC:      quitC,
+		tc:         nil,
+		listener:   nil,
 	}
 	return &tm
 }
 
-type Cluster struct{
-	nodes map[string]*SingleTxManager
+type Cluster struct {
+	nodes         map[string]*SingleTxManager
 	coordinatorID string
 
 	wg *sync.WaitGroup
 }
 
-func NewCluster(MemberID []string) Cluster{
-	n := len(MemberID)
+func NewAddrs(MemberID []string) map[string]string {
 	clusterMapper := map[string]string{}
 	startPort := 8880
-	for i, id := range MemberID{
-		clusterMapper[id] = "localhost:" + strconv.Itoa(startPort + i)
+	for i, id := range MemberID {
+		clusterMapper[id] = "localhost:" + strconv.Itoa(startPort+i)
 	}
+	return clusterMapper
+}
 
-	for k, v := range clusterMapper{
+func NewCluster(MemberID []string) Cluster {
+	n := len(MemberID)
+	clusterMapper := NewAddrs(MemberID)
+	for k, v := range clusterMapper {
 		println(k, v)
 	}
 
 	var wg sync.WaitGroup
-	cluster := make(map[string] *SingleTxManager, n)
+	cluster := make(map[string]*SingleTxManager, n)
 
 	globalLogger := zap.NewExample()
 
 	for _, selfID := range MemberID {
-		infoChan :=  make(chan TxMsg, 64)
+		infoChan := make(chan TxMsg, 64)
 		quitChan := make(chan struct{}, 0) // sync
 
 		localLogger := globalLogger.With(
 			zap.Namespace(fmt.Sprintf("Node-%s", selfID)))
 		fakeLogger := zap.NewStdLog(localLogger)
-		
+
 		tc := NewSingleTxCoordinator(clusterMapper, selfID, infoChan).
 			WithLogger(fakeLogger)
-		
+
 		tm := NewSingleTxManager(infoChan, quitChan).
 			WithCoordinator(tc).
 			WithLogger(fakeLogger)
@@ -387,25 +392,25 @@ func NewCluster(MemberID []string) Cluster{
 	}
 
 	c := Cluster{
-		nodes: cluster,
+		nodes:         cluster,
 		coordinatorID: "",
-		wg: &wg,
+		wg:            &wg,
 	}
 	return c
 }
 
-func (c *Cluster) WithNewTx(TxID string, coordinatorID string) *Cluster{
+func (c *Cluster) WithNewTx(TxID string, coordinatorID string) *Cluster {
 	c.coordinatorID = coordinatorID
-	for _, tm := range c.nodes{
+	for _, tm := range c.nodes {
 		tm.tc.nofityTxInfo(TxID, coordinatorID)
 	}
 	return c
 }
 
-func (c *Cluster) NonFaulty2PC(TxID string){
-	for _, tm := range c.nodes{
+func (c *Cluster) TwoPhaseCommit(TxID string) {
+	for _, tm := range c.nodes {
 		c.wg.Add(1)
-		go func(wGroup *sync.WaitGroup, manager *SingleTxManager){
+		go func(wGroup *sync.WaitGroup, manager *SingleTxManager) {
 			manager.run()
 			wGroup.Done()
 		}(c.wg, tm)
@@ -419,7 +424,6 @@ func (c *Cluster) NonFaulty2PC(TxID string){
 func main() {
 	c := NewCluster([]string{"0", "1", "2", "3"})
 	c.WithNewTx("0123", "1").
-		NonFaulty2PC("0123")
-
+		TwoPhaseCommit("0123")
 
 }
