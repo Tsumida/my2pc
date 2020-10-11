@@ -111,6 +111,7 @@ func (tc *SingleTxCoordinator) waitForReply(TxID string, prepareChan <-chan stri
 	for {
 		select {
 		case <-timer.C:
+			tc.logger.Print("Prepare phase timeout")
 			quit = true
 		case _ = <-prepareChan:
 			cnt += 1
@@ -147,11 +148,12 @@ func (tc *SingleTxCoordinator) CommitTx(TxID string) {
 	// 4. Backups receive the MSG, log <Commit T>/<Abort T>  execute it.
 	// 5. TxManager release lock on the Tx.
 
-	timer := time.NewTimer(time.Duration(60*1000) * time.Millisecond)
 	prepareChan := make(chan string, len(tc.Cluster))
 
 	// TODO: filtering duplicate replies
-	tc.startPrepare(TxID, prepareChan)
+	go tc.startPrepare(TxID, prepareChan)
+
+	timer := time.NewTimer(time.Duration(2000) * time.Millisecond)
 	decision := tc.waitForReply(TxID, prepareChan, timer)
 	tc.logger.Printf("leader made decision: %v", decision)
 	tc.startDecide(TxID, decision)
@@ -218,8 +220,8 @@ func (tc *SingleTxCoordinator) WithLogger(l *log.Logger) *SingleTxCoordinator {
 	return tc
 }
 
-// Configure Create and run grpc server.
-func (tc *SingleTxCoordinator) Configure() {
+// runCoordinator Create and run grpc server.
+func (tc *SingleTxCoordinator) runCoordinator(ctx context.Context) {
 	addrPort, _ := tc.Cluster[tc.ServerID]
 	lis, err := net.Listen("tcp", addrPort)
 	if err != nil {
@@ -229,10 +231,15 @@ func (tc *SingleTxCoordinator) Configure() {
 	pb.RegisterCoordinatorServer(gs, tc)
 	go func() {
 		if err := gs.Serve(lis); err != nil {
-			tc.logger.Panic(err)
+			tc.logger.Print(err)
 		}
 	}()
-	tc.logger.Println("start server")
+
+	select {
+	case <-ctx.Done():
+		tc.logger.Print("stop grpc server")
+		gs.GracefulStop()
+	}
 }
 
 func NewSingleTxCoordinator(clusterInfo map[string]string, selfID string, infoChan chan<- TxMsg) *SingleTxCoordinator {
@@ -286,14 +293,14 @@ type TxStablizer interface {
 // SingleTxManager WAL logger
 type SingleTxManager struct {
 	stabilizer []TxMsg
-	sm         map[string][]TxMsg // TxID -> StateSeq
+	sm         map[string]*TxMsg // TxID -> StateSeq
 
 	tc       *SingleTxCoordinator
 	listener *net.Listener
 
 	logger     *log.Logger
 	TxProgress <-chan TxMsg
-	quitC      <-chan struct{}
+	quitC      chan struct{}
 }
 
 func (tm *SingleTxManager) WithCoordinator(tc *SingleTxCoordinator) *SingleTxManager {
@@ -313,14 +320,20 @@ func (tm *SingleTxManager) record(msg TxMsg) *SingleTxManager {
 }
 
 func (tm *SingleTxManager) run() {
-	tm.logger.Printf("running\n")
+	//tm.logger.Printf("running\n")
 	quit := false
-	tm.tc.Configure()
+	ctx, cancelF := context.WithCancel(context.Background())
+	go tm.tc.runCoordinator(ctx)
 	for {
 		select {
 		case msg := <-tm.TxProgress:
 			tm.record(msg)
 			if msg.Phase == TxPhaseAbort || msg.Phase == TxPhaseCommit {
+				tm.sm[tm.tc.TxID] = &TxMsg{
+					TxID: tm.tc.TxID,
+					Phase: msg.Phase,
+					CoordinatorID: msg.CoordinatorID,
+				}
 				quit = true
 			}
 		case _ = <-tm.quitC:
@@ -330,14 +343,16 @@ func (tm *SingleTxManager) run() {
 			break
 		}
 	}
-	tm.logger.Printf("done. statemachine = %v", tm.sm[tm.tc.ServerID])
+	// stop runCoordinator and other
+	cancelF()
+	//tm.logger.Printf("done. statemachine = %v", tm.sm[tm.tc.ServerID])
 }
 
-func NewSingleTxManager(infoChan <-chan TxMsg, quitC <-chan struct{}) *SingleTxManager {
+func NewSingleTxManager(infoChan <-chan TxMsg, quitC chan struct{}) *SingleTxManager {
 	tm := SingleTxManager{
 		TxProgress: infoChan,
 		stabilizer: make([]TxMsg, 0, 128),
-		sm:         make(map[string][]TxMsg),
+		sm:         make(map[string]*TxMsg),
 		quitC:      quitC,
 		tc:         nil,
 		listener:   nil,
@@ -422,8 +437,4 @@ func (c *Cluster) TwoPhaseCommit(TxID string) {
 }
 
 func main() {
-	c := NewCluster([]string{"0", "1", "2", "3"})
-	c.WithNewTx("0123", "1").
-		TwoPhaseCommit("0123")
-
 }
