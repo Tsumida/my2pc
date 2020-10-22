@@ -2,11 +2,13 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	pb "my2pc/coordinatorrpc"
 	"net"
+	"os"
 	"strconv"
 	"sync"
 	"time"
@@ -30,7 +32,7 @@ type ValidateFunc = func(TxID string) bool
 type ActionFunc = func(TxID string, CoordinatorID string)
 type Decision = int32
 
-type SingleTxCoordinator struct {
+type TxCoordinator struct {
 	Cluster  map[string]string
 	ServerID string
 
@@ -46,12 +48,12 @@ type SingleTxCoordinator struct {
 	logger *log.Logger
 }
 
-func (tc *SingleTxCoordinator) nofityTxInfo(TxID string, coorID string) {
+func (tc *TxCoordinator) nofityTxInfo(TxID string, coorID string) {
 	tc.TxID = TxID
 	tc.CoordinatorID = coorID
 }
 
-func (tc *SingleTxCoordinator) startPrepare(TxID string, prepareChan chan<- string) {
+func (tc *TxCoordinator) startPrepare(TxID string, prepareChan chan<- string) {
 	for _, ap := range tc.Cluster {
 		go func(addrPort string) {
 			PrepareRequest := pb.PrepareRequest{
@@ -80,7 +82,7 @@ func (tc *SingleTxCoordinator) startPrepare(TxID string, prepareChan chan<- stri
 	}
 }
 
-func (tc *SingleTxCoordinator) startDecide(TxID string, decision int32) {
+func (tc *TxCoordinator) startDecide(TxID string, decision int32) {
 	for _, ap := range tc.Cluster {
 		go func(addrPort string) {
 			DecideRequest := pb.DecideRequest{
@@ -105,7 +107,7 @@ func (tc *SingleTxCoordinator) startDecide(TxID string, decision int32) {
 	}
 }
 
-func (tc *SingleTxCoordinator) waitForReply(TxID string, prepareChan <-chan string, timer *time.Timer) Decision {
+func (tc *TxCoordinator) waitForReply(TxID string, prepareChan <-chan string, timer *time.Timer) Decision {
 	cnt := 0
 	quit := false
 	for {
@@ -133,7 +135,7 @@ func (tc *SingleTxCoordinator) waitForReply(TxID string, prepareChan <-chan stri
 	return decision
 }
 
-func (tc *SingleTxCoordinator) CommitTx(TxID string) {
+func (tc *TxCoordinator) CommitTx(TxID string) Decision{
 	if tc.CoordinatorID != tc.ServerID {
 		tc.logger.Panic()
 	}
@@ -157,10 +159,10 @@ func (tc *SingleTxCoordinator) CommitTx(TxID string) {
 	decision := tc.waitForReply(TxID, prepareChan, timer)
 	tc.logger.Printf("leader made decision: %v", decision)
 	tc.startDecide(TxID, decision)
-
+	return decision
 }
 
-func (tc *SingleTxCoordinator) Prepare(ctx context.Context, in *pb.PrepareRequest) (*pb.PrepareReply, error) {
+func (tc *TxCoordinator) Prepare(ctx context.Context, in *pb.PrepareRequest) (*pb.PrepareReply, error) {
 	if in.TxID != tc.TxID {
 		return nil, errors.New("incompatible TxID")
 	}
@@ -182,7 +184,7 @@ func (tc *SingleTxCoordinator) Prepare(ctx context.Context, in *pb.PrepareReques
 	return &reply, nil
 }
 
-func (tc *SingleTxCoordinator) Decide(ctx context.Context, in *pb.DecideRequest) (*pb.DecideReply, error) {
+func (tc *TxCoordinator) Decide(ctx context.Context, in *pb.DecideRequest) (*pb.DecideReply, error) {
 
 	if in.TxID != tc.TxID {
 		return nil, errors.New(fmt.Sprintf("incompatible TxID %s ", in.TxID))
@@ -215,13 +217,13 @@ func (tc *SingleTxCoordinator) Decide(ctx context.Context, in *pb.DecideRequest)
 	return &reply, nil
 }
 
-func (tc *SingleTxCoordinator) WithLogger(l *log.Logger) *SingleTxCoordinator {
+func (tc *TxCoordinator) WithLogger(l *log.Logger) *TxCoordinator {
 	tc.logger = l
 	return tc
 }
 
 // runCoordinator Create and run grpc server.
-func (tc *SingleTxCoordinator) runCoordinator(ctx context.Context) {
+func (tc *TxCoordinator) runCoordinator(ctx context.Context) {
 	addrPort, _ := tc.Cluster[tc.ServerID]
 	lis, err := net.Listen("tcp", addrPort)
 	if err != nil {
@@ -242,7 +244,7 @@ func (tc *SingleTxCoordinator) runCoordinator(ctx context.Context) {
 	}
 }
 
-func NewSingleTxCoordinator(clusterInfo map[string]string, selfID string, infoChan chan<- TxMsg) *SingleTxCoordinator {
+func NewTxCoordinator(clusterInfo map[string]string, selfID string, infoChan chan<- TxMsg) *TxCoordinator {
 	validP := func(TxID string) bool {
 		return true
 	}
@@ -257,7 +259,7 @@ func NewSingleTxCoordinator(clusterInfo map[string]string, selfID string, infoCh
 		}
 	}
 
-	txc := SingleTxCoordinator{
+	txc := TxCoordinator{
 		TxID:          "",
 		TxPhase:       TxPhasePrepare,
 		Cluster:       clusterInfo,
@@ -272,8 +274,8 @@ func NewSingleTxCoordinator(clusterInfo map[string]string, selfID string, infoCh
 	return &txc
 }
 
-func RecoverTxCoordinator(clusterInfo map[string]string, selfID string, infoChan chan<- TxMsg, TxInfo TxMsg) *SingleTxCoordinator {
-	tc := NewSingleTxCoordinator(clusterInfo, selfID, infoChan)
+func RecoverTxCoordinator(clusterInfo map[string]string, selfID string, infoChan chan<- TxMsg, TxInfo TxMsg) *TxCoordinator {
+	tc := NewTxCoordinator(clusterInfo, selfID, infoChan)
 	tc.TxID = TxInfo.TxID
 	tc.TxPhase = TxInfo.Phase
 	tc.CoordinatorID = TxInfo.CoordinatorID
@@ -281,63 +283,74 @@ func RecoverTxCoordinator(clusterInfo map[string]string, selfID string, infoChan
 }
 
 type TxMsg struct {
-	TxID          string
-	CoordinatorID string
-	Phase         string
+	TxID          string `json:"txid"`
+	CoordinatorID string `json:"coordinatorID"`
+	Phase         string `json:"phase"`
 }
 
 type TxStablizer interface {
 	Stablize(txlog TxMsg) error
 }
 
-// SingleTxManager WAL logger
-type SingleTxManager struct {
+// TxManager WAL logger
+type TxManager struct {
 	stabilizer []TxMsg
 	sm         map[string]*TxMsg // TxID -> StateSeq
+	sto Storage
 
-	tc       *SingleTxCoordinator
+	tc       *TxCoordinator
 	listener *net.Listener
 
 	logger     *log.Logger
 	TxProgress <-chan TxMsg
-	quitC      chan struct{}
+	quitC      chan TxManagerAction
 }
 
-func (tm *SingleTxManager) WithCoordinator(tc *SingleTxCoordinator) *SingleTxManager {
+func (tm *TxManager) WithCoordinator(tc *TxCoordinator) *TxManager {
 	tm.tc = tc
 	return tm
 }
 
-func (tm *SingleTxManager) WithLogger(l *log.Logger) *SingleTxManager {
+func (tm *TxManager) WithStableStorage(sto Storage) *TxManager{
+	tm.sto = sto
+	return tm
+}
+
+func (tm *TxManager) WithLogger(l *log.Logger) *TxManager {
 	tm.logger = l
 	return tm
 }
 
-func (tm *SingleTxManager) record(msg TxMsg) *SingleTxManager {
+func (tm *TxManager) record(msg TxMsg) *TxManager {
 	tm.stabilizer = append(tm.stabilizer, msg)
 	tm.logger.Printf("log: %v \n", msg)
 	return tm
 }
 
-func (tm *SingleTxManager) run() {
+func (tm *TxManager) run() {
 	//tm.logger.Printf("running\n")
 	quit := false
 	ctx, cancelF := context.WithCancel(context.Background())
 	go tm.tc.runCoordinator(ctx)
+	tm.sm[tm.tc.TxID] = &TxMsg{
+		TxID: tm.tc.TxID,
+		Phase: TxPhasePrepare,
+		CoordinatorID: tm.tc.CoordinatorID,
+	}
+
 	for {
 		select {
 		case msg := <-tm.TxProgress:
 			tm.record(msg)
 			if msg.Phase == TxPhaseAbort || msg.Phase == TxPhaseCommit {
-				tm.sm[tm.tc.TxID] = &TxMsg{
-					TxID: tm.tc.TxID,
-					Phase: msg.Phase,
-					CoordinatorID: msg.CoordinatorID,
-				}
+				tm.sm[tm.tc.TxID].Phase = msg.Phase
 				quit = true
 			}
-		case _ = <-tm.quitC:
-			quit = true
+		case action := <-tm.quitC:
+			switch action {
+			case ActionDown:
+				quit = true
+			}
 		}
 		if quit {
 			break
@@ -348,8 +361,8 @@ func (tm *SingleTxManager) run() {
 	//tm.logger.Printf("done. statemachine = %v", tm.sm[tm.tc.ServerID])
 }
 
-func NewSingleTxManager(infoChan <-chan TxMsg, quitC chan struct{}) *SingleTxManager {
-	tm := SingleTxManager{
+func NewTxManager(infoChan <-chan TxMsg, quitC chan TxManagerAction) *TxManager {
+	tm := TxManager{
 		TxProgress: infoChan,
 		stabilizer: make([]TxMsg, 0, 128),
 		sm:         make(map[string]*TxMsg),
@@ -360,13 +373,111 @@ func NewSingleTxManager(infoChan <-chan TxMsg, quitC chan struct{}) *SingleTxMan
 	return &tm
 }
 
-type Cluster struct {
-	nodes         map[string]*SingleTxManager
-	coordinatorID string
+type TxManagerAction = string
 
-	wg *sync.WaitGroup
+const (
+	ActionDown = "down"
+)
+
+
+type Storage interface {
+	Stablize(msg *TxMsg) error
+	Recover(chan TxMsg)
 }
 
+type LocalSto struct{
+	filename string
+	file *os.File
+}
+
+func (ls *LocalSto) Open(){
+	f, err := os.Open(ls.filename)
+	if err != nil{
+		panic(err)
+	}
+	ls.file = f
+}
+
+func (ls *LocalSto) Stablize(msg *TxMsg) error{
+	if msg == nil{
+		return nil
+	}
+	if ls.file == nil{
+		ls.Open()
+	}
+	enc := json.NewEncoder(ls.file)
+	return enc.Encode(msg)
+}
+
+func (ls *LocalSto) Recover(ch chan TxMsg) {
+	// no log.
+	if _, err := os.Stat(ls.filename); os.IsNotExist(err){
+		return 
+	}
+
+	f, err := os.Create(ls.filename)
+	if err != nil{
+		panic(err)
+	}
+	defer f.Close()
+	
+	msg := TxMsg{}
+	dec := json.NewDecoder(f)
+	if err := dec.Decode(&msg); err != nil{
+		panic(err)
+	}
+	ch <- msg
+	close(ch)
+}
+
+type Cluster struct {
+	
+	mx sync.Mutex
+	
+	nodes         map[string]*TxManager
+	coordinatorID string
+	mapper map[string]string
+
+	wg *sync.WaitGroup
+	log *zap.Logger
+}
+
+func (c *Cluster) DropAll(){
+	c.mx.Lock()
+	defer c.mx.Unlock()
+	for _, node := range c.nodes{
+		node.quitC <- ActionDown
+	}
+}
+
+func (c *Cluster) Drop(id string){
+	c.mx.Lock()
+	c.nodes[id].quitC <- ActionDown
+	c.mx.Unlock()
+}
+
+func (c *Cluster) Up(NewNodesID []string){
+	for _, crashNode := range NewNodesID{
+		infoChan := make(chan TxMsg, 64)
+		quitChan := make(chan TxManagerAction, 1) // sync
+
+		c.mx.Lock()
+		localLogger := c.log.With(
+			zap.Namespace(fmt.Sprintf("Node-%s", crashNode)))
+		fakeLogger := zap.NewStdLog(localLogger)
+
+		tc := NewTxCoordinator(c.mapper,  crashNode, infoChan).
+			WithLogger(fakeLogger)
+
+		tm := NewTxManager(infoChan, quitChan).
+			WithCoordinator(tc).
+			WithLogger(fakeLogger).
+			WithStableStorage(&LocalSto{filename:  crashNode, file: nil})
+
+		c.nodes[crashNode] = tm
+		c.mx.Unlock()
+	}
+}
 func NewAddrs(MemberID []string) map[string]string {
 	clusterMapper := map[string]string{}
 	startPort := 8880
@@ -384,24 +495,24 @@ func NewCluster(MemberID []string) Cluster {
 	}
 
 	var wg sync.WaitGroup
-	cluster := make(map[string]*SingleTxManager, n)
-
+	cluster := make(map[string]*TxManager, n)
 	globalLogger := zap.NewExample()
 
 	for _, selfID := range MemberID {
 		infoChan := make(chan TxMsg, 64)
-		quitChan := make(chan struct{}, 0) // sync
+		quitChan := make(chan TxManagerAction, 1) // sync
 
 		localLogger := globalLogger.With(
 			zap.Namespace(fmt.Sprintf("Node-%s", selfID)))
 		fakeLogger := zap.NewStdLog(localLogger)
 
-		tc := NewSingleTxCoordinator(clusterMapper, selfID, infoChan).
+		tc := NewTxCoordinator(clusterMapper, selfID, infoChan).
 			WithLogger(fakeLogger)
 
-		tm := NewSingleTxManager(infoChan, quitChan).
+		tm := NewTxManager(infoChan, quitChan).
 			WithCoordinator(tc).
-			WithLogger(fakeLogger)
+			WithLogger(fakeLogger).
+			WithStableStorage(&LocalSto{filename: selfID, file: nil})
 
 		cluster[selfID] = tm
 	}
@@ -410,6 +521,8 @@ func NewCluster(MemberID []string) Cluster {
 		nodes:         cluster,
 		coordinatorID: "",
 		wg:            &wg,
+		log: 			globalLogger,
+		mapper: clusterMapper,
 	}
 	return c
 }
@@ -422,18 +535,13 @@ func (c *Cluster) WithNewTx(TxID string, coordinatorID string) *Cluster {
 	return c
 }
 
-func (c *Cluster) TwoPhaseCommit(TxID string) {
+func (c *Cluster) Run2pc(TxID string) Decision{
 	for _, tm := range c.nodes {
-		c.wg.Add(1)
-		go func(wGroup *sync.WaitGroup, manager *SingleTxManager) {
-			manager.run()
-			wGroup.Done()
-		}(c.wg, tm)
+		go tm.run()
 	}
 	fmt.Println("warm up ...")
 	time.Sleep(2 * time.Second)
-	go c.nodes[c.coordinatorID].tc.CommitTx(TxID)
-	c.wg.Wait()
+	return c.nodes[c.coordinatorID].tc.CommitTx(TxID)
 }
 
 func main() {
