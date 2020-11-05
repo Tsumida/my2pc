@@ -46,11 +46,15 @@ func CheckAllWithExpectedState(c *Cluster, txid string, expectedState string) er
 
 func TestNonFaulty2pc(t *testing.T){
 	c := NewCluster([]string{"0", "1", "2", "3"})
-	if d := c.WithNewTx("0123", "1").
-		Run2pc("0123"); d != TxCommit{
+	c.WithNewTx("0123", "1").
+		RunCluster()
+	// wait for grpc sever
+	time.Sleep(2 * time.Second)
+
+	if d := c.StartCommit("0123"); d != TxCommit{
 			t.Fatalf("unexpected decision %v", d)
 	}
-	time.Sleep(2 * time.Second)
+	time.Sleep(1 * time.Second)
 	c.DropAll()
 	if err := CheckAllWithExpectedState(&c, "0123", TxPhaseCommit); err != nil{
 		t.Fatal(err)
@@ -61,31 +65,33 @@ func TestFollowerCrashInPrepare(t *testing.T){
 	fmt.Printf("test: follower crashed in prepare phase")
 	coorID := "1"
 	member := []string{"0", "1", "2", "3"}
+	crashID := []string{"0", "2"}
 	c := NewCluster(member)
 
+	done := make(chan Decision, 1)
+	go func(){
+		time.Sleep(100 * time.Millisecond)
+		c.WithNewTx("0123", coorID).RunCluster()
+		time.Sleep(2 * time.Second)
+		d := c.StartCommit("0123")
+		time.Sleep(2 * time.Second)
+		done <- d
+	}()
+
+	// node start first.
 	// node crash
-	crashID := []string{"0", "2", "3"}
+	time.Sleep(500 * time.Millisecond)
 	for _, crashNode := range crashID{
 		c.Drop(crashNode)
 	}
 
-	// start tx
-	done := make(chan struct{}, 1)
-	go func(){
-		time.Sleep(100 * time.Millisecond)
-		if d := c.WithNewTx("0123", coorID).
-			Run2pc("0123"); d != TxAbort{
-				t.Fatalf("unexpected decison %v", d)
-		}
-		time.Sleep(1 * time.Second)
-		done <- struct{}{}
-	}()
-
-
 	select {
 		case <- time.After(10 * time.Second):
 			t.Fatal("timeout")
-		case <- done:
+		case d := <- done:
+			if d != TxAbort{
+				t.Fatal()
+			}
 			if err := CheckSubSetWithExpectedState(&c, crashID, "0123", TxPhasePrepare); err != nil{
 				t.Fatal(err)
 			}
@@ -93,5 +99,4 @@ func TestFollowerCrashInPrepare(t *testing.T){
 				t.Fatal(err)
 			}
 	}
-	c.DropAll()
 }
